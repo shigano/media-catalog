@@ -1,0 +1,338 @@
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum MediaType {
+  MOVIE
+  SERIES
+}
+
+enum MatchStatus {
+  MATCHED       // trouvé sur TMDB avec une bonne confiance
+  AMBIGUOUS     // plusieurs résultats possibles, à confirmer manuellement
+  UNMATCHED     // rien trouvé sur TMDB
+}
+
+/// Un film, ou une série (le conteneur — les épisodes sont dans Episode).
+model MediaItem {
+  id           String      @id @default(cuid())
+  type         MediaType
+  title        String      // titre détecté depuis le nom de fichier/dossier
+  year         Int?
+  filePath     String?     @db.Text // uniquement pour un film (fichier unique)
+  folderPath   String?     @db.Text // pour une série (dossier racine)
+
+  libraryId    String?
+  library      Library?    @relation(fields: [libraryId], references: [id], onDelete: SetNull)
+
+  tmdbId       Int?
+  matchStatus  MatchStatus @default(UNMATCHED)
+  matchedTitle String?     // titre officiel TMDB, peut différer du nom de fichier
+  posterUrl    String?
+  overview     String?     @db.Text
+  genres       String?     @db.Text // liste séparée par virgules, ex: "Action, Aventure"
+
+  // Casting principal et appartenance à une collection TMDB — remplis à
+  // la demande (première consultation de la fiche, ou enrichissement en
+  // masse depuis le panel admin), pas au moment du scan pour ne pas
+  // doubler le nombre d'appels TMDB sur une bibliothèque de plusieurs
+  // dizaines de milliers de fichiers.
+  castNames      String? @db.Text // liste séparée par virgules
+  collectionId   Int?
+  collectionName String?
+  collectionPosterUrl String? // affiche officielle TMDB de la saga, pas celle d'un film
+
+  // Une fois vrai (après une correction manuelle via "Identifier"), les
+  // scans suivants ne touchent plus à la reconnaissance de cet item — sans
+  // ça, chaque nouveau scan relançait la recherche automatique et
+  // écrasait silencieusement la correction manuelle.
+  manuallyVerified Boolean @default(false)
+
+  // Statut TMDB d'une série ("Returning Series", "Ended", "Canceled"...),
+  // mis en cache à chaque consultation de la fiche — sert la liste admin
+  // "Séries en cours", entièrement automatique : toute série reconnue
+  // dont le statut n'est pas "Ended"/"Canceled" y apparaît, sans marquage
+  // manuel. `tmdbSeriesStatusCheckedAt` évite de rappeler TMDB à chaque
+  // affichage de la liste si la donnée est encore fraîche (< 24h).
+  tmdbSeriesStatus          String?
+  tmdbSeriesStatusCheckedAt DateTime?
+
+  // Prochain épisode annoncé par TMDB — mis en cache en même temps que le
+  // statut, sert à afficher "prochain épisode le [date]" dans la liste
+  // "Séries en cours" sans rappel TMDB supplémentaire.
+  tmdbNextEpisodeAirDate DateTime?
+  tmdbNextEpisodeLabel   String? // ex: "S03E05 · Le Retour"
+
+  // Épisodes déjà diffusés selon TMDB mais absents du NAS — recalculé en
+  // même temps que le statut (voir src/lib/seriesTracking.ts). Une série
+  // n'apparaît dans "Séries en cours" QUE si ce compte est > 0 : à jour,
+  // elle en sort ; un nouvel épisode annoncé l'y refait apparaître.
+  missingEpisodesCount Int?
+  missingEpisodesData  Json? // [{seasonNumber, episodeNumber, name, airDate}]
+
+  // Note TMDB et durée — remplies en masse par le job d'enrichissement
+  // (voir /api/admin/enrich), pas seulement à la consultation d'une
+  // fiche, pour permettre de trier TOUTE une médiathèque par note/durée
+  // et pas juste les items déjà consultés individuellement.
+  tmdbVoteAverage Float?
+  runtimeMinutes  Int?
+
+  // Nombre de "premières lectures" (une par profil, la première fois
+  // qu'il regarde ce titre) — incrémenté depuis
+  // /api/profiles/[id]/progress. Ce n'est PAS un vrai compteur de
+  // rediffusions (revoir un titre déjà terminé n'incrémente pas), juste
+  // le nombre de profils distincts qui l'ont commencé au moins une fois —
+  // limitation assumée, faute d'un vrai événement "lecture démarrée"
+  // dans le lecteur actuel.
+  playCount Int @default(0)
+
+  // Classification parentale — label brut TMDB (France si disponible,
+  // sinon USA en repli) et son rang numérique pré-calculé pour permettre
+  // un tri direct en base (0 = tous publics, plus haut = plus restrictif).
+  // Rempli par le job d'enrichissement, comme la note et la durée.
+  contentRating     String?
+  contentRatingRank Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  episodes Episode[]
+  reports  Report[]
+
+  @@index([type, matchStatus])
+  @@index([collectionId])
+}
+
+/// Épisode détecté, rattaché à une série (MediaItem de type SERIES).
+model Episode {
+  id            String      @id @default(cuid())
+  mediaItemId   String
+  seasonNumber  Int
+  episodeNumber Int
+  filePath      String      @db.Text
+
+  tmdbEpisodeName String?
+  // Id TMDB propre à cet épisode (voir TmdbSeasonEpisode.tmdbEpisodeId) —
+  // rempli à la consultation de la fiche série (chaque saison consultée
+  // renseigne ses épisodes), pas au scan (qui ne connaît que le fichier,
+  // pas encore le détail des épisodes TMDB).
+  tmdbEpisodeId   Int?
+  matchStatus     MatchStatus @default(UNMATCHED)
+
+  createdAt DateTime @default(now())
+
+  mediaItem MediaItem @relation(fields: [mediaItemId], references: [id])
+
+  @@unique([mediaItemId, seasonNumber, episodeNumber])
+}
+
+/// Historique des scans lancés, pour suivre la progression et les erreurs.
+model ScanLog {
+  id            String   @id @default(cuid())
+  status        String   @default("running") // running | done | error
+  totalFiles    Int?     // connu après le comptage rapide initial
+  filesScanned  Int      @default(0)
+  itemsMatched  Int      @default(0)
+  itemsUnmatched Int     @default(0)
+  errorMessage  String?  @db.Text
+  startedAt     DateTime @default(now())
+  finishedAt    DateTime?
+}
+
+/// Médiathèque nommée (ex: "Films", "Séries", "Jeunesse") — regroupe un ou
+/// plusieurs dossiers scannés ensemble, et sert de catégorie affichée côté
+/// client (comme les bibliothèques de Jellyfin).
+model Library {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+
+  // Nombre de fichiers vidéo détectés lors du dernier scan complet de
+  // cette médiathèque — sert la vérification légère du scan planifié
+  // (compter les fichiers est rapide, un scan complet avec matching TMDB
+  // ne l'est pas) : seule une médiathèque dont le compte a augmenté
+  // depuis ce chiffre déclenche un vrai scan.
+  lastKnownFileCount Int?
+
+  folders LibraryFolder[]
+  items   MediaItem[]
+}
+
+model LibraryFolder {
+  id        String   @id @default(cuid())
+  libraryId String
+  path      String   @unique
+  createdAt DateTime @default(now())
+
+  library Library @relation(fields: [libraryId], references: [id], onDelete: Cascade)
+}
+
+/// Profil façon Netflix — jusqu'à 5 par compte du portail (userId vient du
+/// jeton, pas de relation directe : les comptes vivent dans la base du
+/// portail, pas ici).
+model Profile {
+  id        String   @id @default(cuid())
+  userId    String
+  name      String
+  avatarKey String   // clé d'un avatar généré côté client, pas une image stockée
+  createdAt DateTime @default(now())
+
+  // Le tout premier profil créé pour un compte — seul lui peut gérer les
+  // profils (créer/modifier/supprimer, restreindre des médiathèques) et
+  // accéder à "Mon compte"/"Mes factures". Un seul par compte, jamais
+  // supprimable tant qu'il reste le seul profil "mère" du compte.
+  isMaster Boolean @default(false)
+
+  // Identifiants de médiathèques masquées pour CE profil (ex: horreur
+  // pour un profil enfant), séparés par des virgules — même approche que
+  // le champ `genres` ailleurs dans ce schéma plutôt qu'une table de
+  // jointure, largement suffisant pour ce volume de données.
+  restrictedLibraryIds String? @db.Text
+
+  watchProgress WatchProgress[]
+  watchedMarks  WatchedMark[]
+  searchLogs    SearchLog[]
+  favorites     Favorite[]
+  reports       Report[]
+
+  @@index([userId])
+}
+
+/// Code PIN protégeant l'accès à la gestion des profils — un seul par
+/// compte (userId vient du jeton, comme pour Profile, pas de relation
+/// directe : les comptes vivent dans la base du portail, pas ici).
+/// Stocké haché, jamais en clair.
+model AccountPin {
+  userId    String   @id
+  pinHash   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// Code de récupération à usage unique, envoyé par email en cas d'oubli
+/// du PIN — remplace tout code précédent pour ce compte (un seul actif à
+/// la fois). Supprimé après utilisation ou expiration.
+model AccountPinReset {
+  userId    String   @id
+  codeHash  String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+/// Un appareil en train de regarder quelque chose, pour appliquer la
+/// limite d'écrans simultanés de l'offre (voir Plan.maxConcurrentStreams
+/// côté portail). Rafraîchie à chaque rapport de progression (~15s
+/// pendant la lecture) — une session sans nouvelle sur
+/// `heartbeatTimeoutMs` (voir streamSessionLimit.ts) est considérée
+/// terminée et ne compte plus dans la limite.
+model ActiveStreamSession {
+  id              String   @id @default(cuid())
+  userId          String
+  deviceSessionId String
+  lastHeartbeatAt DateTime @default(now())
+  createdAt       DateTime @default(now())
+
+  @@unique([userId, deviceSessionId])
+  @@index([userId])
+}
+
+/// Favori d'un profil — soit un film/une série entière (mediaItemId),
+/// soit un épisode précis (episodeId), jamais les deux à la fois — même
+/// principe que WatchProgress.
+model Favorite {
+  id          String   @id @default(cuid())
+  profileId   String
+  mediaItemId String?
+  episodeId   String?
+  createdAt   DateTime @default(now())
+
+  profile Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@unique([profileId, mediaItemId])
+  @@unique([profileId, episodeId])
+  @@index([profileId])
+}
+
+/// Position de lecture d'un profil sur un film ou un épisode — sert à la
+/// fois à la reprise de lecture et à alimenter "Continuer à regarder".
+model WatchProgress {
+  id              String   @id @default(cuid())
+  profileId       String
+  mediaItemId     String?  // pour un film
+  episodeId       String?  // pour un épisode de série
+  positionSeconds Int
+  durationSeconds Int?
+  updatedAt       DateTime @updatedAt
+
+  profile Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@unique([profileId, mediaItemId])
+  @@unique([profileId, episodeId])
+}
+
+/// Marque "vu" par profil — persiste indépendamment de WatchProgress
+/// (qui, lui, est supprimé une fois un titre terminé, pour garder
+/// "Continuer à regarder" propre). Sert uniquement à afficher le petit
+/// repère "vu" sur les épisodes, jamais nettoyé automatiquement.
+model WatchedMark {
+  id          String   @id @default(cuid())
+  profileId   String
+  mediaItemId String? // pour un film
+  episodeId   String? // pour un épisode de série
+  watchedAt   DateTime @default(now())
+
+  profile Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@unique([profileId, mediaItemId])
+  @@unique([profileId, episodeId])
+}
+
+/// Recherches effectuées par un profil — sert à pondérer légèrement l'ordre
+/// d'affichage (types/mots-clés qui reviennent souvent pour ce profil).
+model SearchLog {
+  id        String   @id @default(cuid())
+  profileId String
+  query     String
+  createdAt DateTime @default(now())
+
+  profile Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@index([profileId])
+}
+
+/// Signalement d'un problème sur un film/une série par un client — motif
+/// prédéfini + texte libre facultatif. Reste en base jusqu'à suppression
+/// manuelle par un admin une fois traité (pas d'auto-expiration : un
+/// signalement traité doit être explicitement nettoyé, pas oublié).
+model Report {
+  id          String   @id @default(cuid())
+  mediaItemId String
+  profileId   String
+  reason      String // "WRONG_MATCH" | "PLAYBACK_ISSUE" | "MISSING_SUBTITLES" | "AUDIO_ISSUE" | "OTHER"
+  comment     String?  @db.Text
+  createdAt   DateTime @default(now())
+
+  mediaItem MediaItem @relation(fields: [mediaItemId], references: [id], onDelete: Cascade)
+  profile   Profile   @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@index([mediaItemId])
+}
+
+/// Appareil inscrit aux notifications push (un jeton Firebase Cloud
+/// Messaging par installation d'appli) — pas lié à un compte précis,
+/// les notifications envoyées ici sont diffusées à TOUS les appareils
+/// enregistrés (voir /api/admin/notifications/send), pas ciblées par
+/// utilisateur. Un jeton invalide (désinstallation, réinitialisation...)
+/// est automatiquement retiré lors du prochain envoi qui échoue dessus.
+model PushToken {
+  id         String   @id @default(cuid())
+  token      String   @unique
+  platform   String // "android" | "ios" | "windows"...
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+}
