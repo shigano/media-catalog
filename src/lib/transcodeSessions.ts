@@ -1,5 +1,7 @@
 import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
 import { mkdir, rm, stat } from 'fs/promises';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import os from 'os';
 import path from 'path';
 
@@ -12,6 +14,20 @@ type Session = {
 };
 
 const sessions = new Map<string, Session>();
+const execFileAsync = promisify(execFile);
+
+/** Select a French audio stream by its audio-stream ordinal (not its global stream index). */
+export async function frenchAudioOrdinal(filePath: string): Promise<number | null> {
+  const { stdout } = await execFileAsync('ffprobe', [
+    '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream_tags=language',
+    '-of', 'json', filePath,
+  ]);
+  const data = JSON.parse(stdout) as { streams?: Array<{ tags?: { language?: string } }> };
+  const index = (data.streams ?? []).findIndex((stream) =>
+    ['fr', 'fra', 'fre'].includes((stream.tags?.language ?? '').toLowerCase()),
+  );
+  return index >= 0 ? index : null;
+}
 const BASE_TMP_DIR = path.join(os.tmpdir(), 'media-catalog-transcode');
 const SESSION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes sans activité
 
@@ -54,6 +70,7 @@ export async function getOrCreateHlsSession(
   sessionKey: string,
   filePath: string,
   startSeconds = 0,
+  audioLang?: string,
 ): Promise<string> {
   const existing = sessions.get(sessionKey);
   if (existing) {
@@ -81,8 +98,12 @@ export async function getOrCreateHlsSession(
     '-crf', '23',
     '-vf', 'scale=-2:min(720\\,ih)',
   ];
+  // Explicit French selection is opt-in; default playback retains its original mapping.
+  const frenchOrdinal = audioLang === 'fr'
+    ? await frenchAudioOrdinal(filePath).catch(() => null)
+    : null;
   const audioArgs =
-    probe.audioCodec === 'aac' || probe.audioCodec === 'mp3'
+    frenchOrdinal === null && (probe.audioCodec === 'aac' || probe.audioCodec === 'mp3')
       ? ['-c:a', 'copy']
       : // -ac 2 : force le mixage en stéréo. Le 5.1 encodé en AAC utilise
         // souvent une configuration de canaux (PCE) mal supportée par les
@@ -98,6 +119,7 @@ export async function getOrCreateHlsSession(
     '-i',
     filePath,
     ...videoArgs,
+    ...(frenchOrdinal !== null ? ['-map', '0:v:0', '-map', `0:a:${frenchOrdinal}`] : []),
     ...audioArgs,
     '-f',
     'hls',
