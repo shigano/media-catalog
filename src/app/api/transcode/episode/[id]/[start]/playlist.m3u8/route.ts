@@ -19,6 +19,7 @@ export async function GET(
   }
 
   const startSeconds = Math.max(0, Math.floor(Number(params.start) || 0));
-  const sessionKey = `episode-${episode.id}-${startSeconds}`;
-  return servePlaylist(sessionKey, episode.filePath, startSeconds);
+  const audioLang = new URL(req.url).searchParams.get('audioLang') === 'fr' ? 'fr' : undefined;
+  const sessionKey = `episode-${episode.id}-${startSeconds}${audioLang ? '-fr' : ''}`;
+  return servePlaylist(sessionKey, episode.filePath, startSeconds, audioLang);
 }
