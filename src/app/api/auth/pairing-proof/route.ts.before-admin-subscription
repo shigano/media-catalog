@@ -1,0 +1,111 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { jwtVerify } from 'jose';
+import mysql from 'mysql2/promise';
+import { z } from 'zod';
+
+import { env } from '@/lib/config';
+import { signSessionToken } from '@/lib/session';
+
+const Schema = z.object({
+  pairingProof: z.string().min(1),
+});
+
+function pairingSecretKey() {
+  const secret = process.env.PAIRING_INTERNAL_SECRET;
+
+  if (!secret) {
+    throw new Error('PAIRING_INTERNAL_SECRET manquant');
+  }
+
+  return new TextEncoder().encode(secret);
+}
+
+export async function POST(req: NextRequest) {
+  const parsed = Schema.safeParse(await req.json().catch(() => ({})));
+
+  if (!parsed.success) {
+    return NextResponse.json(
+      { error: 'Preuve de connexion invalide' },
+      { status: 400 },
+    );
+  }
+
+  let userId: string;
+
+  try {
+    const { payload } = await jwtVerify(
+      parsed.data.pairingProof,
+      pairingSecretKey(),
+      {
+        issuer: 'account-portal',
+        audience: 'media-catalog',
+      },
+    );
+
+    if (
+      payload.purpose !== 'native-pairing' ||
+      typeof payload.sub !== 'string' ||
+      payload.sub.length === 0
+    ) {
+      return NextResponse.json(
+        { error: 'Preuve de connexion invalide' },
+        { status: 401 },
+      );
+    }
+
+    userId = payload.sub;
+  } catch {
+    return NextResponse.json(
+      { error: 'Preuve de connexion invalide ou expirée' },
+      { status: 401 },
+    );
+  }
+
+  const connection = await mysql.createConnection(
+    env.accountPortalDatabaseUrl(),
+  );
+
+  try {
+    const [userRows] = await connection.execute(
+      `SELECT id, email, emailVerified, role
+       FROM User
+       WHERE id = ?
+       LIMIT 1`,
+      [userId],
+    );
+
+    const user = (userRows as any[])[0];
+
+    if (!user || !user.emailVerified) {
+      return NextResponse.json(
+        { error: 'Compte non autorisé' },
+        { status: 403 },
+      );
+    }
+
+    const [subscriptionRows] = await connection.execute(
+      `SELECT id
+       FROM Subscription
+       WHERE userId = ? AND status = 'ACTIVE'
+       LIMIT 1`,
+      [user.id],
+    );
+
+    if (!(subscriptionRows as any[])[0]) {
+      return NextResponse.json(
+        { error: 'Abonnement actif requis' },
+        { status: 403 },
+      );
+    }
+
+    const token = await signSessionToken({
+      userId: user.id,
+      email: user.email,
+      role: user.role,
+    });
+
+    return NextResponse.json({ token });
+  } finally {
+    await connection.end();
+  }
+}
