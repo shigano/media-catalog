@@ -11,5 +11,6 @@ export async function GET(
   if (session instanceof NextResponse) return session;
 
   const startSeconds = Math.max(0, Math.floor(Number(params.start) || 0));
-  return serveSegment(`movie-${params.id}-${startSeconds}`, params.segment);
+  const audioLang = new URL(req.url).searchParams.get('audioLang') === 'fr' ? 'fr' : undefined;
+  return serveSegment(`movie-${params.id}-${startSeconds}${audioLang ? '-fr' : ''}`, params.segment);
 }
