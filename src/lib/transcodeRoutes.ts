@@ -22,8 +22,9 @@ export async function servePlaylist(
   sessionKey: string,
   filePath: string,
   startSeconds = 0,
+  audioLang?: string,
 ): Promise<Response> {
-  const outputDir = await getOrCreateHlsSession(sessionKey, filePath, startSeconds);
+  const outputDir = await getOrCreateHlsSession(sessionKey, filePath, startSeconds, audioLang);
   const playlistPath = path.join(outputDir, 'playlist.m3u8');
 
   const ready = await waitForFile(playlistPath, 30000);
@@ -34,7 +35,11 @@ export async function servePlaylist(
     );
   }
 
-  const content = await readFile(playlistPath, 'utf-8');
+  let content = await readFile(playlistPath, 'utf-8');
+  // Relative HLS segment URLs do not inherit the playlist query string.
+  if (audioLang === 'fr') {
+    content = content.replace(/^(segment\d+\.ts)$/gm, '$1?audioLang=fr');
+  }
   return new Response(content, {
     headers: { 'Content-Type': 'application/vnd.apple.mpegurl' },
   });
