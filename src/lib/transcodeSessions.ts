@@ -23,9 +23,10 @@ export async function frenchAudioOrdinal(filePath: string): Promise<number | nul
     '-of', 'json', filePath,
   ]);
   const data = JSON.parse(stdout) as { streams?: Array<{ tags?: { language?: string } }> };
-  const index = (data.streams ?? []).findIndex((stream) =>
-    ['fr', 'fra', 'fre'].includes((stream.tags?.language ?? '').toLowerCase()),
-  );
+  const index = (data.streams ?? []).findIndex((stream) => {
+    const language = (stream.tags?.language ?? '').trim().toLowerCase().replace('_', '-');
+    return ['fr', 'fra', 'fre'].includes(language.split('-')[0]);
+  });
   return index >= 0 ? index : null;
 }
 const BASE_TMP_DIR = path.join(os.tmpdir(), 'media-catalog-transcode');
