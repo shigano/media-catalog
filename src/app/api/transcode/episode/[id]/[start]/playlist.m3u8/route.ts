@@ -20,6 +20,7 @@ export async function GET(
 
   const startSeconds = Math.max(0, Math.floor(Number(params.start) || 0));
   const audioLang = new URL(req.url).searchParams.get('audioLang') === 'fr' ? 'fr' : undefined;
-  const sessionKey = `episode-${episode.id}-${startSeconds}${audioLang ? '-fr' : ''}`;
-  return servePlaylist(sessionKey, episode.filePath, startSeconds, audioLang);
+  const preferVideoCopy = new URL(req.url).searchParams.get('videoMode') === 'copy';
+  const sessionKey = `episode-${episode.id}-${startSeconds}${audioLang ? '-fr' : ''}${preferVideoCopy ? '-vcopy' : ''}`;
+  return servePlaylist(sessionKey, episode.filePath, startSeconds, audioLang, preferVideoCopy);
 }
