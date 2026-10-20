@@ -102,9 +102,15 @@ export async function getOrCreateHlsSession(
     '-vf', 'scale=-2:min(720\\,ih)',
   ];
   // Explicit French selection is opt-in; default playback retains its original mapping.
+  // Never silently play the default (often English) track when the
+  // client explicitly requested French. Let the route return a clear
+  // error rather than mislabeling another language as French.
   const frenchOrdinal = audioLang === 'fr'
-    ? await frenchAudioOrdinal(filePath).catch(() => null)
+    ? await frenchAudioOrdinal(filePath)
     : null;
+  if (audioLang === 'fr' && frenchOrdinal === null) {
+    throw new Error('FRENCH_AUDIO_NOT_FOUND');
+  }
   console.info(`[HLS] ${sessionKey} video=${probe.videoCodec} mode=${preferVideoCopy && probe.videoCodec === 'h264' ? 'copy' : 'transcode'}`);
   const audioArgs =
     frenchOrdinal === null && (probe.audioCodec === 'aac' || probe.audioCodec === 'mp3')
