@@ -71,6 +71,7 @@ export async function getOrCreateHlsSession(
   filePath: string,
   startSeconds = 0,
   audioLang?: string,
+  preferVideoCopy = false,
 ): Promise<string> {
   const existing = sessions.get(sessionKey);
   if (existing) {
@@ -92,7 +93,9 @@ export async function getOrCreateHlsSession(
   // être plus lent que la lecture elle-même (constaté : speed=0.436x,
   // donc deux fois trop lent), ce qui cause des blocages répétés. On
   // sacrifie de la qualité d'image pour rester fluide.
-  const videoArgs = [
+  const videoArgs = preferVideoCopy && probe.videoCodec === 'h264'
+    ? ['-c:v', 'copy']
+    : [
     '-c:v', 'libx264',
     '-preset', 'ultrafast',
     '-crf', '23',
@@ -102,6 +105,7 @@ export async function getOrCreateHlsSession(
   const frenchOrdinal = audioLang === 'fr'
     ? await frenchAudioOrdinal(filePath).catch(() => null)
     : null;
+  console.info(`[HLS] ${sessionKey} video=${probe.videoCodec} mode=${preferVideoCopy && probe.videoCodec === 'h264' ? 'copy' : 'transcode'}`);
   const audioArgs =
     frenchOrdinal === null && (probe.audioCodec === 'aac' || probe.audioCodec === 'mp3')
       ? ['-c:a', 'copy']
