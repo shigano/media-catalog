@@ -25,7 +25,16 @@ export async function servePlaylist(
   audioLang?: string,
   preferVideoCopy = false,
 ): Promise<Response> {
-  const outputDir = await getOrCreateHlsSession(sessionKey, filePath, startSeconds, audioLang, preferVideoCopy);
+  let outputDir: string;
+  try {
+    outputDir = await getOrCreateHlsSession(sessionKey, filePath, startSeconds, audioLang, preferVideoCopy);
+  } catch (error) {
+    if (error instanceof Error && error.message === 'FRENCH_AUDIO_NOT_FOUND') {
+      return new Response('Piste audio française introuvable dans le fichier source', { status: 422 });
+    }
+    console.error('[HLS] Failed to initialize transcode session', error);
+    return new Response('Impossible de démarrer le transcodage', { status: 500 });
+  }
   const playlistPath = path.join(outputDir, 'playlist.m3u8');
 
   const ready = await waitForFile(playlistPath, 30000);
