@@ -12,5 +12,6 @@ export async function GET(
 
   const startSeconds = Math.max(0, Math.floor(Number(params.start) || 0));
   const audioLang = new URL(req.url).searchParams.get('audioLang') === 'fr' ? 'fr' : undefined;
-  return serveSegment(`episode-${params.id}-${startSeconds}${audioLang ? '-fr' : ''}`, params.segment);
+  const preferVideoCopy = new URL(req.url).searchParams.get('videoMode') === 'copy';
+  return serveSegment(`episode-${params.id}-${startSeconds}${audioLang ? '-fr' : ''}${preferVideoCopy ? '-vcopy' : ''}`, params.segment);
 }
